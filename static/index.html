@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>配方替代过敏原追踪</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <h1>🧪 配方替代过敏原追踪</h1>
+  <span class="subtitle">食品研发 · 替代链递归分析 · 循环检测</span>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="ingredients">原料</button>
+  <button class="tab" data-tab="substitutions">替代关系</button>
+  <button class="tab" data-tab="recipes">配方版本</button>
+  <button class="tab" data-tab="analysis">过敏原分析</button>
+  <button class="tab" data-tab="safe">安全替代方案</button>
+  <button class="tab" data-tab="compare">版本对比</button>
+  <button class="tab" data-tab="io">导入导出</button>
+</nav>
+
+<main>
+  <!-- ========== 原料 ========== -->
+  <section id="tab-ingredients" class="panel active">
+    <div class="panel-head">
+      <h2>原料库</h2>
+      <button class="btn primary" id="btn-new-ingredient">＋ 新增原料</button>
+    </div>
+    <form id="form-ingredient" class="card form-grid hidden">
+      <input type="hidden" id="ing-orig-code" />
+      <label>代码 <input id="ing-code" required placeholder="如 BUTTER" /></label>
+      <label>名称 <input id="ing-name" required placeholder="如 黄油" /></label>
+      <label>过敏原（逗号分隔）<input id="ing-allergens" placeholder="如 乳, 大豆" /></label>
+      <label class="span2">备注 <input id="ing-note" placeholder="可选" /></label>
+      <div class="span2 actions">
+        <button type="submit" class="btn primary">保存</button>
+        <button type="button" class="btn" id="btn-cancel-ingredient">取消</button>
+      </div>
+    </form>
+    <table class="data-table">
+      <thead><tr><th>代码</th><th>名称</th><th>过敏原</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody id="tbody-ingredients"></tbody>
+    </table>
+  </section>
+
+  <!-- ========== 替代关系 ========== -->
+  <section id="tab-substitutions" class="panel">
+    <div class="panel-head">
+      <h2>替代关系（有向：源 → 可替代为）</h2>
+    </div>
+    <form id="form-substitution" class="card form-grid">
+      <label>源原料
+        <select id="sub-source" required></select>
+      </label>
+      <label>替代为
+        <select id="sub-target" required></select>
+      </label>
+      <label class="span2">备注 <input id="sub-note" placeholder="如 等质量替换" /></label>
+      <div class="span2 actions"><button type="submit" class="btn primary">添加替代边</button></div>
+    </form>
+    <table class="data-table">
+      <thead><tr><th>源</th><th></th><th>目标</th><th>过敏原变化</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody id="tbody-substitutions"></tbody>
+    </table>
+  </section>
+
+  <!-- ========== 配方版本 ========== -->
+  <section id="tab-recipes" class="panel">
+    <div class="panel-head">
+      <h2>配方版本</h2>
+      <button class="btn primary" id="btn-new-recipe">＋ 新增配方版本</button>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>配方代码</th><th>版本</th><th>名称</th><th>原料数</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody id="tbody-recipes"></tbody>
+    </table>
+
+    <form id="form-recipe" class="card hidden">
+      <div class="form-grid">
+        <input type="hidden" id="rec-id" />
+        <label>配方代码 <input id="rec-code" required placeholder="如 COOKIE-001" /></label>
+        <label>版本 <input id="rec-version" required placeholder="如 1.0" /></label>
+        <label class="span2">名称 <input id="rec-name" required placeholder="如 经典黄油曲奇" /></label>
+        <label class="span2">备注 <input id="rec-note" placeholder="可选" /></label>
+      </div>
+      <h3>配料表</h3>
+      <table class="data-table" id="table-items">
+        <thead><tr><th>原料</th><th>用量</th><th>单位</th><th></th></tr></thead>
+        <tbody id="tbody-items"></tbody>
+      </table>
+      <div class="actions">
+        <button type="button" class="btn" id="btn-add-item">＋ 添加一行</button>
+        <button type="submit" class="btn primary">保存配方</button>
+        <button type="button" class="btn" id="btn-cancel-recipe">取消</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ========== 过敏原分析 ========== -->
+  <section id="tab-analysis" class="panel">
+    <div class="panel-head">
+      <h2>替代链过敏原分析</h2>
+      <div class="head-controls">
+        <select id="analyze-recipe"></select>
+        <button class="btn primary" id="btn-analyze">开始分析</button>
+      </div>
+    </div>
+    <div id="analyze-result"></div>
+  </section>
+
+  <!-- ========== 安全替代方案 ========== -->
+  <section id="tab-safe" class="panel">
+    <div class="panel-head">
+      <h2>安全替代方案</h2>
+      <div class="head-controls">
+        <select id="safe-recipe"></select>
+        <button class="btn primary" id="btn-safe-search">生成安全方案</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>需要避开的过敏原</h3>
+      <p class="hint">勾选后，含所选过敏原的原料及替代候选会被排除；过敏原清单随所选配方（含其替代链可达范围）动态加载。也可手动补充。</p>
+      <div id="safe-allergens" class="allergen-checks"></div>
+      <div class="actions" style="margin-top:10px">
+        <input id="safe-allergen-custom" placeholder="手动添加过敏原（如 芝麻）" style="flex:1;min-width:200px" />
+        <button type="button" class="btn" id="btn-safe-add-allergen">＋ 添加</button>
+      </div>
+    </div>
+    <div id="safe-result"></div>
+  </section>
+
+  <!-- ========== 版本对比 ========== -->
+  <section id="tab-compare" class="panel">
+    <div class="panel-head">
+      <h2>两版配方差异对比</h2>
+    </div>
+    <div class="card compare-picker">
+      <label>版本 A <select id="cmp-a"></select></label>
+      <span class="arrow">⇄</span>
+      <label>版本 B <select id="cmp-b"></select></label>
+      <button class="btn primary" id="btn-compare">对比</button>
+    </div>
+    <div id="compare-result"></div>
+  </section>
+
+  <!-- ========== 导入导出 ========== -->
+  <section id="tab-io" class="panel">
+    <div class="panel-head"><h2>JSON 导入 / 导出</h2></div>
+    <div class="card io-grid">
+      <div>
+        <h3>导出</h3>
+        <p class="hint">导出全部原料、配方版本与替代关系为一个 JSON 文件。</p>
+        <button class="btn primary" id="btn-export">⬇ 导出 JSON</button>
+      </div>
+      <div>
+        <h3>导入</h3>
+        <p class="hint">粘贴 JSON 或选择文件。merge=合并（upsert），replace=清空后导入。</p>
+        <select id="import-mode">
+          <option value="merge">merge（合并）</option>
+          <option value="replace">replace（清空重导）</option>
+        </select>
+        <input type="file" id="import-file" accept="application/json,.json" />
+        <textarea id="import-text" placeholder="也可直接粘贴 JSON..."></textarea>
+        <button class="btn primary" id="btn-import">⬆ 导入</button>
+      </div>
+      <div>
+        <h3>示例数据</h3>
+        <p class="hint">一键载入演示数据（包含一条双向替代循环与两版曲奇配方）。</p>
+        <button class="btn" id="btn-seed">🌱 载入示例数据</button>
+      </div>
+    </div>
+    <pre id="io-message" class="message"></pre>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
