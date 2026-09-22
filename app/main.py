@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from . import crud, graph, safe_plans, seed
+from . import audit, crud, graph, safe_plans, seed
 from .database import get_connection, init_db
 from .schemas import (
     ConfirmPlanIn,
@@ -229,25 +229,38 @@ def create_recipe(data: RecipeIn, conn=Depends(conn_dep)):
         raise HTTPException(409, f"配方 {data.code} 版本 {data.version} 已存在")
     _validate_items(conn, data)
     rid, _ = crud.upsert_recipe(conn, data)
+    # 与配方写入同一事务：请求结束时随业务数据一起 commit
+    after = audit.recipe_snapshot(conn, rid)
+    audit.record_event(conn, "created", None, after)
     return _recipe_out(conn, crud.get_recipe(conn, rid))
 
 
 @app.put("/api/recipes/{recipe_id}")
 def update_recipe(recipe_id: int, data: RecipeIn, conn=Depends(conn_dep)):
-    if crud.get_recipe(conn, recipe_id) is None:
+    existing = crud.get_recipe(conn, recipe_id)
+    if existing is None:
         raise HTTPException(404, "配方不存在")
     clash = crud.find_recipe(conn, data.code, data.version)
     if clash and clash["id"] != recipe_id:
         raise HTTPException(409, f"已存在同代码同版本的另一条配方 id={clash['id']}")
     _validate_items(conn, data)
+    # 先取变更前完整快照（必须在覆盖 recipe_items 之前）
+    before = audit.recipe_snapshot(conn, recipe_id)
     crud.upsert_recipe(conn, data, recipe_id=recipe_id)
+    after = audit.recipe_snapshot(conn, recipe_id)
+    audit.record_event(conn, "updated", before, after)
     return _recipe_out(conn, crud.get_recipe(conn, recipe_id))
 
 
 @app.delete("/api/recipes/{recipe_id}")
 def remove_recipe(recipe_id: int, conn=Depends(conn_dep)):
-    if not crud.delete_recipe(conn, recipe_id):
+    existing = crud.get_recipe(conn, recipe_id)
+    if existing is None:
         raise HTTPException(404, "配方不存在")
+    # 先留存删除前完整快照，再删除配方与配料（同一事务）
+    before = audit.recipe_snapshot(conn, recipe_id)
+    crud.delete_recipe(conn, recipe_id)
+    audit.record_event(conn, "deleted", before, None)
     return {"deleted": recipe_id}
 
 
@@ -403,6 +416,57 @@ def compare_recipes(payload: dict, conn=Depends(conn_dep)):
         },
         "missing_nodes": sorted(set(a["missing_nodes"]) | set(b["missing_nodes"])),
     }
+
+
+# ---------------- 配方变更审计时间线 ----------------
+
+def _parse_event_time(value: Optional[str], field: str) -> Optional[str]:
+    """校验时间范围参数并归一化为可与 occurred_at 字典序比较的 UTC 字符串。
+
+    接受 ISO8601（如 2026-09-01 / 2026-09-01T08:00 / 带偏移量的完整格式）。
+    """
+    if value is None or value == "":
+        return None
+    import datetime as _dt
+
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        dt = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise HTTPException(422, f"{field} 需为 ISO8601 时间，如 2026-09-01 或 2026-09-01T08:00:00Z")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    if len(text) == 10:  # 仅日期：start 含当天 00:00，end 含当天 23:59:59.999
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return dt.isoformat(timespec="microseconds")
+
+
+@app.get("/api/recipe-events")
+def get_recipe_events(
+    recipe: Optional[str] = None,
+    recipe_id: Optional[int] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 200,
+    conn=Depends(conn_dep),
+):
+    """配方变更审计时间线：可按配方代码（含改名前后的同一配方）或配方 id、
+    以及时间范围过滤；按发生时间正序返回，每条事件带前后完整配料快照与可读差异。
+    """
+    start_iso = _parse_event_time(start, "start")
+    end_raw = end.strip() if end else None
+    end_iso = _parse_event_time(end, "end")
+    if end_raw and len(end_raw.replace("Z", "")) == 10 and end_iso is not None:
+        import datetime as _dt
+
+        end_iso = (_dt.datetime.fromisoformat(end_iso) + _dt.timedelta(days=1)
+                   - _dt.timedelta(microseconds=1)).isoformat(timespec="microseconds")
+    limit = max(1, min(limit, 1000))
+    events = audit.list_events(
+        conn, recipe=recipe, recipe_id=recipe_id,
+        start=start_iso, end=end_iso, limit=limit,
+    )
+    return {"count": len(events), "events": events}
 
 
 # ---------------- 导入 / 导出 ----------------

@@ -356,7 +356,125 @@ function fillRecipeSelects() {
     $("#cmp-a").selectedIndex = 0;
     $("#cmp-b").selectedIndex = 1;
   }
+  fillAuditRecipeSelect();
 }
+
+// ---------------- 配方变更审计 ----------------
+
+function fillAuditRecipeSelect() {
+  const sel = $("#audit-recipe");
+  const groups = {};
+  state.recipes.forEach((r) => { (groups[r.code] ||= []).push(r); });
+  sel.innerHTML = '<option value="">全部配方</option>' + Object.entries(groups).map(([code, rs]) => `
+    <optgroup label="${esc(code)}">
+      ${rs.map((r) => `<option value="${esc(code)}">${esc(code)} · v${esc(r.version)}</option>`).join("")}
+    </optgroup>`).join("");
+}
+
+function fmtAuditAmount(q, unit) {
+  const qty = q == null || q === "" ? "未填用量" : (Number.isInteger(Number(q)) ? String(Number(q)) : String(q));
+  return qty === "未填用量" ? qty : `${qty}${esc(unit || "")}`;
+}
+
+function snapshotItemsHtml(snap) {
+  if (!snap) return '<span class="tag muted">无快照</span>';
+  if (!snap.items.length) return '<span class="tag muted">（无配料）</span>';
+  return `<table class="data-table audit-snap-table">
+    <thead><tr><th>原料</th><th>用量</th><th>单位</th></tr></thead>
+    <tbody>${snap.items.map((it) => `
+      <tr><td class="code-mono">${esc(it.ingredient_code)}</td>
+          <td>${it.quantity == null ? "—" : esc(it.quantity)}</td>
+          <td>${esc(it.unit || "")}</td></tr>`).join("")}
+    </tbody></table>`;
+}
+
+function renderAuditEvents(data) {
+  const box = $("#audit-result");
+  if (!data.events.length) {
+    box.innerHTML = '<div class="card hint" style="margin-top:12px">所选范围内暂无配方变更事件。创建、修改或删除配方后会在此留下记录。</div>';
+    return;
+  }
+  const badge = {
+    created: '<span class="badge audit-created">创建</span>',
+    updated: '<span class="badge audit-updated">修改</span>',
+    deleted: '<span class="badge audit-deleted">删除</span>',
+  };
+  box.innerHTML = `<div class="hint" style="margin:10px 0">共 ${data.count} 条事件（按时间正序）</div>
+    <div class="audit-timeline">` + data.events.map((ev) => {
+    let detail = "";
+    if (ev.event_type === "updated") {
+      detail = `<ul class="audit-diff">${ev.diff_lines.length
+        ? ev.diff_lines.map((l) => {
+            const cls = l.startsWith("＋") ? "line-added" : l.startsWith("－") ? "line-removed" : "line-changed";
+            return `<li class="${cls}">${esc(l)}</li>`;
+          }).join("")
+        : '<li class="hint">配料与用量无变化</li>'}</ul>`;
+    } else if (ev.event_type === "created") {
+      detail = `<ul class="audit-diff">${ev.diff_lines.length
+        ? ev.diff_lines.map((l) => `<li class="line-added">${esc(l)}</li>`).join("")
+        : '<li class="hint">创建时无配料</li>'}</ul>`;
+    } else {
+      detail = `<ul class="audit-diff">${ev.diff_lines.length
+        ? ev.diff_lines.map((l) => `<li class="line-removed">${esc(l)}</li>`).join("")
+        : '<li class="hint">删除前无配料</li>'}</ul>`;
+    }
+    return `
+    <div class="audit-event audit-${ev.event_type}">
+      <div class="audit-event-head">
+        ${badge[ev.event_type]}
+        <span class="code-mono">${esc(ev.recipe_code)}</span>
+        <span class="audit-summary">${esc(ev.summary)}</span>
+        <small class="audit-time">${esc(ev.occurred_at)} · #${ev.id}</small>
+      </div>
+      ${detail}
+      <details class="audit-snapshots">
+        <summary>查看变更前后完整配料快照</summary>
+        <div class="audit-snap-grid">
+          <div><h4>变更前</h4>${snapshotItemsHtml(ev.before)}</div>
+          <div><h4>变更后</h4>${snapshotItemsHtml(ev.after)}</div>
+        </div>
+      </details>
+    </div>`;
+  }).join("") + "</div>";
+}
+
+async function loadAuditEvents() {
+  const params = new URLSearchParams();
+  const code = $("#audit-recipe").value;
+  if (code) params.set("recipe", code);
+  if ($("#audit-start").value) params.set("start", $("#audit-start").value);
+  if ($("#audit-end").value) params.set("end", $("#audit-end").value);
+  $("#audit-result").innerHTML = '<div class="card hint" style="margin-top:12px">加载中…</div>';
+  try {
+    const data = await api(`/api/recipe-events?${params.toString()}`);
+    renderAuditEvents(data);
+  } catch (err) {
+    $("#audit-result").innerHTML = "";
+    toast(err.message, true);
+  }
+}
+
+$("#btn-audit-query").addEventListener("click", loadAuditEvents);
+
+$("#btn-compare").addEventListener("click", async () => {
+  const a = $("#cmp-a").value;
+  const b = $("#cmp-b").value;
+  if (!a || !b) return toast("请选择两个配方版本", true);
+  if (a === b) return toast("请选择不同的两个版本", true);
+  try {
+    const data = await api("/api/compare", {
+      method: "POST",
+      body: { recipe_a: { id: Number(a) }, recipe_b: { id: Number(b) } },
+    });
+    renderCompare(data);
+    // 对比后自动按 B 版配方代码刷新该配方的审计时间线
+    const recB = state.recipes.find((r) => String(r.id) === String(b));
+    if (recB) $("#audit-recipe").value = recB.code;
+    loadAuditEvents();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
 
 // ---------------- 过敏原分析渲染 ----------------
 
@@ -852,23 +970,7 @@ $("#safe-result").addEventListener("click", (e) => {
   downloadBlob(toPurchaseCsv(safeState.confirmed), `${purchaseFileBase(safeState.confirmed)}.csv`, "text/csv;charset=utf-8");
 });
 
-// ---------------- 版本对比 ----------------
-
-$("#btn-compare").addEventListener("click", async () => {
-  const a = $("#cmp-a").value;
-  const b = $("#cmp-b").value;
-  if (!a || !b) return toast("请选择两个配方版本", true);
-  if (a === b) return toast("请选择不同的两个版本", true);
-  try {
-    const data = await api("/api/compare", {
-      method: "POST",
-      body: { recipe_a: { id: Number(a) }, recipe_b: { id: Number(b) } },
-    });
-    renderCompare(data);
-  } catch (err) {
-    toast(err.message, true);
-  }
-});
+// ---------------- 版本对比（渲染） ----------------
 
 function diffItemRows(items, kind) {
   return items.map((x) => `
@@ -988,5 +1090,8 @@ $("#btn-seed").addEventListener("click", async () => {
 // ---------------- 启动 ----------------
 
 refreshAll()
-  .then(() => loadSafeAllergens())
+  .then(() => {
+    loadSafeAllergens();
+    loadAuditEvents();
+  })
   .catch((err) => toast("初始化失败: " + err.message, true));

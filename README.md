@@ -4,24 +4,30 @@
 
 - 技术栈：Python 3.11 + FastAPI + SQLite + 原生 HTML/CSS/JS（无前端构建、无第三方账号）
 - 页面与 API 统一暴露在 **8000** 端口
-- 核心能力：以有向图递归计算替代链带来的过敏原影响、检测循环并标记每条受影响路径、**勾选需避开的过敏原后组合整方"安全替代方案"**、**选定一组方案后由后端重新校验并生成可下载（JSON/CSV）的合并采购清单**、两版配方差异对比、原料/配方 JSON 导入导出
+- 核心能力：以有向图递归计算替代链带来的过敏原影响、检测循环并标记每条受影响路径、**勾选需避开的过敏原后组合整方"安全替代方案"**、**选定一组方案后由后端重新校验并生成可下载（JSON/CSV）的合并采购清单**、两版配方差异对比、原料/配方 JSON 导入导出、**配方变更审计（创建/修改/删除在同一事务中写入不可变事件，保存前后完整配料快照，支持按配方与时间范围查询时间线并生成可读差异）**
 
 ---
 
 ## 一键启动（Docker Compose，推荐）
 
+前置条件：已安装 Docker（含 Compose v2，即 `docker compose` 子命令；旧版 1.x 可用 `docker-compose`）。
+
 ```bash
-docker compose up --build
+# 在项目根目录（含 docker-compose.yml 的目录）执行
+docker compose up --build        # 前台启动，加 -d 可后台运行
+docker compose logs -f           # 跟踪日志
+docker compose down              # 停止并移除容器（数据卷保留，审计记录不丢）
 ```
 
-启动后访问：
+首次启动会自动构建镜像、初始化 SQLite 表结构（含审计表与不可变触发器），随后在 <http://localhost:8000/> 提供服务。启动后访问：
 
 | 地址 | 说明 |
 | --- | --- |
 | http://localhost:8000/ | Web 页面（打开后进入「安全替代方案」标签即可使用新能力） |
 | http://localhost:8000/docs | FastAPI 交互式 API 文档 |
+| http://localhost:8000/api/health | 健康检查，返回 `{"status":"ok"}` 即启动成功 |
 
-SQLite 数据保存在 Docker volume `allergen-data`（容器内 `/data/app.db`），容器重建不丢数据。
+SQLite 数据保存在 Docker volume `allergen-data`（容器内 `/data/app.db`），容器重建、`docker compose down` 均不丢数据；如需彻底清空（含审计事件）可执行 `docker compose down -v`。
 
 仅用 Docker：
 
@@ -32,13 +38,15 @@ docker run -p 8000:8000 -v "$PWD/data:/data" -e DB_PATH=/data/app.db allergen-tr
 
 ## 本地直接运行（无需 Docker）
 
+前置条件：Python 3.11+。
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-默认数据库位于 `./data/app.db`，可用环境变量 `DB_PATH` 覆盖。
+Windows PowerShell 激活虚拟环境用 `.venv\Scripts\Activate.ps1`。默认数据库位于 `./data/app.db`，可用环境变量 `DB_PATH` 覆盖；表结构（含审计表）在应用启动时自动创建，无需手动迁移。
 
 ---
 
@@ -59,6 +67,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
    - 在某个方案下点击「✓ 确认此方案并生成采购清单」：后端会按**当前数据**重新校验所选终点仍避开过敏原（防止生成后原料/替代边/过敏原被改动），通过后按所选终点合并相同原料的数量与单位生成采购清单；校验失败时红色区块逐行列出失败配料与原因，可一键「重新生成安全方案」
    - 采购清单支持 **下载 JSON / CSV**：同原料同单位的数量自动相加，不同单位不做跨单位换算、分行列出并在「无法合并/备注」中说明，未填写数量的配料单独保留待人工核定；清单同时保留每个配方配料的替代路径、过敏原和用量明细
 5. 在「**版本对比**」页选择 v1.0 与 v2.0，查看原料增删、用量变化与过敏原集合差异。
+6. 在「**版本对比**」页下半部分的「**配方变更审计时间线**」中，按配方和日期范围查询变更记录；每次创建 / 修改 / 删除配方都会生成一条事件，展开可看变更前后完整配料快照与逐行可读差异（新增 ＋ / 移除 － / 用量·单位调整 ～）。也可直接调用 `GET /api/recipe-events?recipe=COOKIE-001&start=...&end=...`。
 
 ---
 
@@ -94,6 +103,18 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
   - 每个采购行的 `sources` 保留贡献它的每条配方配料：原配料、用量、替代路径、路径长度、过敏原、是否替代，便于追溯。
 - JSON 直接返回完整结构；CSV 为扁平的「采购行 × 来源配料」表格（含 UTF-8 BOM，Excel 可直接打开）。
 
+## 配方变更审计
+
+对配方的**创建、修改、删除**进行只追加（append-only）的事件留痕，满足配方变更的可追溯要求：
+
+- **同一事务**：审计事件与配方业务写入共用同一数据库连接与事务，请求结束时一起提交；业务写入失败（如引用不存在的原料）则整体回滚，不会留下配方与事件不一致的记录。
+- **不可变**：`recipe_events` 表仅允许 `INSERT`，并在数据库层用 SQLite 触发器禁止 `UPDATE` / `DELETE`（任何篡改尝试都会报错回滚）；因此 `POST /api/import?mode=replace` 清空业务表也不会抹除历史事件。事件表不设指向 `recipes` 的外键，配方被删除后事件与删除前快照仍完整保留。
+- **完整快照**：每条事件保存操作时间（UTC ISO8601）、事件类型、配方标识（内部 id + 配方代码）、变更前 / 变更后的**完整配料快照**（JSON，含代码、版本、名称、备注及每项配料的原料代码、用量、单位）。
+- **可读差异**：服务端对比前后快照，按配料的新增 / 删除，以及同一配料的**用量变化、单位变化**生成结构化 `diff` 与逐行中文描述（`diff_lines`，形如 `～ BUTTER：用量 120 → 100，单位 g → ml`）与一行摘要。
+- **时间线查询**：`GET /api/recipe-events` 支持按配方代码（`recipe`，改名前后的履历都会包含）或内部 id（`recipe_id`）、时间范围（`start` / `end`，支持 `2026-09-01` 或带时分秒、时区的 ISO8601；仅给结束日期时含当天全天）过滤，按发生时间正序返回，可用 `limit` 限制条数（默认 200，最大 1000）。
+- 前端「版本对比」页在每次对比后自动按 B 版配方代码刷新时间线，也可手动选择配方与日期范围查询；事件卡片可展开查看前后快照。
+- 说明：`/api/seed` 示例数据载入与 `/api/import` 批量导入属于数据维护通道，直接写业务表、不产生逐配方审计事件；审计仅覆盖通过 `/api/recipes` 接口进行的创建 / 修改 / 删除操作。
+
 ## 主要 API
 
 | 方法 | 路径 | 说明 |
@@ -105,6 +126,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/recipes/{id}/safe-plans` | 安全替代方案，body：`{"avoid_allergens": ["乳", "小麦（麸质）"]}`（可空）；返回按替换项数/路径总长度排序的最多 50 组方案，无解时给出阻塞配料 |
 | POST | `/api/recipes/{id}/confirm-plan` | 确认一组方案：后端重新校验所选终点仍避开过敏原，通过后返回按终点合并的采购清单；body：`{"avoid_allergens":[...], "selections":[{"ingredient_code","selected_code","path_codes":[...]}]}`；校验失败返回 422，`detail.failures` 逐行给出原因 |
 | POST | `/api/compare` | 两版配方差异对比，body：`{"recipe_a":{"code","version"}, "recipe_b":{"code","version"}}`（也支持 `{"id": n}`） |
+| GET | `/api/recipe-events` | 配方变更审计时间线，查询参数：`recipe`（配方代码，含改名前后履历）、`recipe_id`、`start`、`end`（ISO8601 日期/时间）、`limit`；返回按时间正序的不可变事件，含前后完整配料快照、结构化差异与可读中文描述 |
 | GET | `/api/export` | 导出全部数据 JSON |
 | POST | `/api/import?mode=merge\|replace` | 导入 JSON；merge 按主键 upsert，replace 清空后导入 |
 | POST | `/api/seed` | 载入内置示例数据（幂等） |
@@ -142,11 +164,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 │   ├── graph.py       # 有向图 DFS：替代链过敏原传播 / 循环检测 / 路径标记
 │   ├── safe_plans.py  # 安全替代方案：候选剪枝枚举 + 最佳优先整方组合（≤50 组）
 │   ├── crud.py        # 原料 / 配方 / 替代关系数据操作
+│   ├── audit.py       # 配方变更审计：不可变事件写入、前后快照与可读差异、时间线查询
 │   ├── schemas.py     # Pydantic 模型与过敏原规范化
-│   ├── database.py    # SQLite 连接与建表
+│   ├── database.py    # SQLite 连接与建表（含 recipe_events 不可变触发器）
 │   └── seed.py        # 内置示例数据
 ├── static/
-│   ├── index.html     # 单页界面（7 个标签页）
+│   ├── index.html     # 单页界面（7 个标签页，版本对比页内含审计时间线）
 │   ├── style.css
 │   └── app.js         # 原生 JS 前端逻辑
 ├── Dockerfile

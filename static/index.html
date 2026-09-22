@@ -144,6 +144,22 @@
       <button class="btn primary" id="btn-compare">对比</button>
     </div>
     <div id="compare-result"></div>
+
+    <div class="panel-head" style="margin-top:26px">
+      <h2>📜 配方变更审计时间线</h2>
+    </div>
+    <div class="card audit-picker">
+      <label>配方
+        <select id="audit-recipe">
+          <option value="">全部配方</option>
+        </select>
+      </label>
+      <label>开始日期 <input type="date" id="audit-start" /></label>
+      <label>结束日期 <input type="date" id="audit-end" /></label>
+      <button class="btn primary" id="btn-audit-query">查询时间线</button>
+      <span class="hint" style="margin:0">事件只追加、不可篡改；每次创建 / 修改 / 删除配方均在同一事务中记录前后完整配料快照</span>
+    </div>
+    <div id="audit-result"></div>
   </section>
 
   <!-- ========== 导入导出 ========== -->

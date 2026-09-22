@@ -292,3 +292,49 @@ tr.row-removed td { background: var(--removed-bg); }
   .form-grid, .io-grid { grid-template-columns: 1fr; }
   .span2 { grid-column: auto; }
 }
+
+/* 配方变更审计时间线 */
+.audit-picker {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.audit-picker label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+.audit-picker input, .audit-picker select { min-width: 150px; }
+
+.audit-timeline { margin-top: 14px; display: flex; flex-direction: column; gap: 12px; }
+.audit-event {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 16px;
+}
+.audit-event.audit-created { border-left-color: var(--primary); }
+.audit-event.audit-updated { border-left-color: var(--warn); }
+.audit-event.audit-deleted { border-left-color: var(--danger); }
+.audit-event-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.audit-summary { font-size: 14px; }
+.audit-time { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.badge.audit-created { background: var(--primary); color: #fff; }
+.badge.audit-updated { background: var(--warn); color: #fff; }
+.badge.audit-deleted { background: var(--danger); color: #fff; }
+
+.audit-diff { margin: 10px 0 4px; padding-left: 4px; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.audit-diff li { font-size: 13px; padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.audit-diff li.line-added { background: var(--ok-bg); color: var(--primary-dark); }
+.audit-diff li.line-removed { background: var(--removed-bg); color: var(--danger); }
+.audit-diff li.line-changed { background: var(--warn-bg); color: #7a5a00; }
+
+.audit-snapshots { margin-top: 8px; }
+.audit-snapshots summary { font-size: 13px; color: var(--muted); cursor: pointer; }
+.audit-snap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+.audit-snap-grid h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+.audit-snap-table { font-size: 12px; }
+
+@media (max-width: 760px) {
+  .audit-snap-grid { grid-template-columns: 1fr; }
+  .audit-time { margin-left: 0; }
+}

@@ -40,9 +40,39 @@ CREATE TABLE IF NOT EXISTS substitutions (
     UNIQUE(source_code, target_code)
 );
 
+-- 配方变更审计：只追加（append-only）的不可变事件流。
+-- 业务侧仅允许 INSERT；UPDATE/DELETE 由下方触发器在数据库层直接拒绝，
+-- 因此即使应用代码有缺陷、或导入 replace 清空业务表，审计事件也不会被改写或抹除。
+-- 不设指向 recipes(id) 的外键：删除配方后事件仍须保留，recipe_id 仅作快照引用。
+CREATE TABLE IF NOT EXISTS recipe_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type    TEXT NOT NULL CHECK (event_type IN ('created', 'updated', 'deleted')),
+    recipe_id     INTEGER,                -- 删除后该 id 不再存在于 recipes，故仅快照保留
+    recipe_code   TEXT NOT NULL,          -- 冗余代码列，便于按配方查询（更新改码时取旧码）
+    occurred_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),  -- UTC ISO8601
+    before_snapshot TEXT,                 -- 变更前完整配料快照 JSON，创建时为 NULL
+    after_snapshot  TEXT,                 -- 变更后完整配料快照 JSON，删除时为 NULL
+    summary       TEXT NOT NULL DEFAULT ''  -- 服务端生成的可读差异摘要
+);
+
 CREATE INDEX IF NOT EXISTS idx_items_recipe ON recipe_items(recipe_id);
 CREATE INDEX IF NOT EXISTS idx_sub_source ON substitutions(source_code);
 CREATE INDEX IF NOT EXISTS idx_sub_target ON substitutions(target_code);
+CREATE INDEX IF NOT EXISTS idx_events_recipe_code ON recipe_events(recipe_code, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON recipe_events(occurred_at);
+
+-- 不可变保护：任何更新/删除审计事件的尝试都直接失败
+CREATE TRIGGER IF NOT EXISTS trg_recipe_events_no_update
+BEFORE UPDATE ON recipe_events
+BEGIN
+    SELECT RAISE(ABORT, 'recipe_events 是不可变审计表，禁止 UPDATE');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_recipe_events_no_delete
+BEFORE DELETE ON recipe_events
+BEGIN
+    SELECT RAISE(ABORT, 'recipe_events 是不可变审计表，禁止 DELETE');
+END;
 """
 
 
