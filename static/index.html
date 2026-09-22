@@ -144,6 +144,21 @@
       <button class="btn primary" id="btn-compare">对比</button>
     </div>
     <div id="compare-result"></div>
+
+    <div class="card audit-card">
+      <div class="panel-head">
+        <h3>🕓 配方变更审计时间线</h3>
+        <div class="head-controls">
+          <select id="audit-scope" style="min-width:260px"></select>
+          <input type="datetime-local" id="audit-start" title="起始时间（可选）" />
+          <span class="muted-sep">至</span>
+          <input type="datetime-local" id="audit-end" title="结束时间（可选）" />
+          <button class="btn primary" id="btn-audit-query">查询</button>
+        </div>
+      </div>
+      <p class="hint">每次创建、修改、删除配方都会在同一数据库事务中写入不可变事件，保留操作时间、配方标识与前后完整配料快照。选择「全部配方」可查看跨配方时间线；时间按 UTC 记录。</p>
+      <div id="audit-result"></div>
+    </div>
   </section>
 
   <!-- ========== 导入导出 ========== -->

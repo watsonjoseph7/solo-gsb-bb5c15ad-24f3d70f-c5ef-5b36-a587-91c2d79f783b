@@ -356,6 +356,29 @@ function fillRecipeSelects() {
     $("#cmp-a").selectedIndex = 0;
     $("#cmp-b").selectedIndex = 1;
   }
+  fillAuditScopeOptions();
+}
+
+// ---------------- 配方变更审计时间线 ----------------
+
+function fillAuditScopeOptions(preferCode = null) {
+  const groups = {};
+  state.recipes.forEach((r) => {
+    (groups[r.code] ||= []).push(r);
+  });
+  let html = '<option value="all">全部配方（按时间倒序）</option>';
+  html += Object.entries(groups).map(([code, rs]) => `
+    <optgroup label="${esc(code)}">
+      <option value="code:${esc(code)}">${esc(code)} · 全部版本</option>
+      ${rs.map((r) => `<option value="id:${r.id}">${esc(code)} v${esc(r.version)} · ${esc(r.name)}</option>`).join("")}
+    </optgroup>`).join("");
+  const sel = $("#audit-scope");
+  const prev = sel.value;
+  sel.innerHTML = html;
+  let target = "";
+  if (preferCode) target = `code:${preferCode}`;
+  else if (prev) target = prev;
+  if (target && Array.from(sel.options).some((o) => o.value === target)) sel.value = target;
 }
 
 // ---------------- 过敏原分析渲染 ----------------
@@ -865,6 +888,9 @@ $("#btn-compare").addEventListener("click", async () => {
       body: { recipe_a: { id: Number(a) }, recipe_b: { id: Number(b) } },
     });
     renderCompare(data);
+    // 对比后自动按配方代码（含全部版本）加载该配方的审计时间线
+    fillAuditScopeOptions(data.recipe_b.code);
+    loadAuditEvents();
   } catch (err) {
     toast(err.message, true);
   }
@@ -927,6 +953,106 @@ function renderCompare(d) {
   $("#compare-result").innerHTML = html;
 }
 
+// ---------------- 配方变更审计时间线（版本对比页内） ----------------
+
+const AUDIT_BADGE = {
+  created: ['tag ok', '创建'],
+  updated: ['tag new', '修改'],
+  deleted: ['tag danger', '删除'],
+};
+const AUDIT_LINE_STYLE = {
+  created: "audit-line-created",
+  added: "audit-line-added",
+  removed: "audit-line-removed",
+  changed: "audit-line-changed",
+  deleted: "audit-line-deleted",
+  meta: "audit-line-meta",
+  noop: "audit-line-noop",
+};
+
+function auditSnapshotTable(snap) {
+  if (!snap) return '<span class="tag muted">无（空快照）</span>';
+  const rows = (snap.items || []).map((it) => `
+    <tr>
+      <td class="code-mono">${esc(it.ingredient_code)}</td>
+      <td>${esc(it.ingredient_name)}</td>
+      <td>${it.quantity ?? "—"}</td>
+      <td>${esc(it.unit || "—")}</td>
+    </tr>`).join("");
+  return `
+    <div class="audit-snap-head">
+      <span class="code-mono">${esc(snap.code)}</span> v${esc(snap.version)} · ${esc(snap.name)}
+      <span class="tag muted">${(snap.items || []).length} 种配料</span>
+    </div>
+    <table class="data-table audit-snap-table">
+      <thead><tr><th>代码</th><th>名称</th><th>用量</th><th>单位</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="4" class="empty">无配料</td></tr>'}</tbody>
+    </table>`;
+}
+
+function renderAuditEvents(events) {
+  const box = $("#audit-result");
+  if (!events.length) {
+    box.innerHTML = '<div class="empty">所选范围内没有审计事件（创建 / 修改 / 删除配方后会出现在这里）</div>';
+    return;
+  }
+  box.innerHTML = events.map((ev, idx) => {
+    const [badgeCls, badgeText] = AUDIT_BADGE[ev.action] || ["tag muted", ev.action];
+    const lines = (ev.diff.lines || []).map((l) =>
+      `<li class="audit-line ${AUDIT_LINE_STYLE[l.kind] || ""}">${esc(l.text)}</li>`).join("");
+    return `
+    <div class="audit-event audit-${esc(ev.action)}">
+      <div class="audit-event-head">
+        <span class="${badgeCls}">${badgeText}</span>
+        <span class="code-mono">${esc(ev.recipe_code)}</span>
+        <span class="tag muted">v${esc(ev.version)}</span>
+        <span class="audit-time">🕓 ${esc(ev.occurred_at)} UTC</span>
+        <span class="tag muted">事件 #${ev.id} · 配方 id=${ev.recipe_id}</span>
+      </div>
+      <ul class="audit-diff">${lines}</ul>
+      <details>
+        <summary>查看前后完整配料快照（事件 #${ev.id}）</summary>
+        <div class="audit-snapshots">
+          <div><h5>操作前</h5>${auditSnapshotTable(ev.before_snapshot)}</div>
+          <div><h5>操作后</h5>${auditSnapshotTable(ev.after_snapshot)}</div>
+        </div>
+      </details>
+    </div>`;
+  }).join("");
+}
+
+async function loadAuditEvents() {
+  const scope = $("#audit-scope").value || "all";
+  const params = new URLSearchParams();
+  let path = "/api/audit/events";
+  if (scope.startsWith("id:")) {
+    path = `/api/recipes/${encodeURIComponent(scope.slice(3))}/audit`;
+  } else if (scope.startsWith("code:")) {
+    params.set("recipe_code", scope.slice(5));
+  }
+  const start = $("#audit-start").value;
+  const end = $("#audit-end").value;
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  params.set("limit", "200");
+  const qs = params.toString();
+  $("#audit-result").innerHTML = '<div class="hint">正在加载审计事件…</div>';
+  try {
+    const events = await api(path + (qs ? `?${qs}` : ""));
+    renderAuditEvents(events);
+  } catch (err) {
+    if (err.status === 404 && scope.startsWith("id:")) {
+      $("#audit-result").innerHTML = '<div class="empty">该配方已被删除，无法按 id 查询；请选择「全部配方」或其配方代码查看历史事件</div>';
+    } else {
+      $("#audit-result").innerHTML = "";
+      toast(err.message, true);
+    }
+  }
+}
+
+$("#btn-audit-query").addEventListener("click", loadAuditEvents);
+$("#audit-scope").addEventListener("change", loadAuditEvents);
+
 // ---------------- 导入 / 导出 / 示例 ----------------
 
 $("#btn-export").addEventListener("click", async () => {
@@ -988,5 +1114,5 @@ $("#btn-seed").addEventListener("click", async () => {
 // ---------------- 启动 ----------------
 
 refreshAll()
-  .then(() => loadSafeAllergens())
+  .then(() => Promise.all([loadSafeAllergens(), loadAuditEvents()]))
   .catch((err) => toast("初始化失败: " + err.message, true));

@@ -2,6 +2,7 @@
 import sqlite3
 from typing import List
 
+from . import audit
 from .schemas import (
     IngredientIn,
     RecipeIn,
@@ -76,7 +77,7 @@ def _replace_items(conn: sqlite3.Connection, recipe_id: int, items: List[RecipeI
 
 
 def upsert_recipe(conn: sqlite3.Connection, data: RecipeIn, recipe_id: int | None = None):
-    """创建或整体替换一个配方版本。"""
+    """创建或整体替换一个配方版本，并在同一事务内追加审计事件。"""
     existing = None
     if recipe_id is not None:
         existing = get_recipe(conn, recipe_id)
@@ -84,27 +85,49 @@ def upsert_recipe(conn: sqlite3.Connection, data: RecipeIn, recipe_id: int | Non
         existing = find_recipe(conn, data.code, data.version)
 
     if existing:
+        rid = existing["id"]
+        before = audit.snapshot_recipe(conn, rid)
         conn.execute(
             "UPDATE recipes SET code=?, version=?, name=?, note=? WHERE id=?",
-            (data.code, data.version, data.name, data.note, existing["id"]),
+            (data.code, data.version, data.name, data.note, rid),
         )
-        rid = existing["id"]
-        status = "updated"
-    else:
-        cur = conn.execute(
-            "INSERT INTO recipes (code, version, name, note) VALUES (?, ?, ?, ?)",
-            (data.code, data.version, data.name, data.note),
-        )
-        rid = cur.lastrowid
-        status = "created"
+        _replace_items(conn, rid, data.items)
+        after = audit.snapshot_recipe(conn, rid)
+        # 内容完全相同的重复保存不产生审计噪音
+        if after != before:
+            audit.record_event(
+                conn, recipe_id=rid, recipe_code=data.code, version=data.version,
+                action="updated", before=before, after=after,
+            )
+        return rid, "updated"
 
+    before_audit = None
+    cur = conn.execute(
+        "INSERT INTO recipes (code, version, name, note) VALUES (?, ?, ?, ?)",
+        (data.code, data.version, data.name, data.note),
+    )
+    rid = cur.lastrowid
     _replace_items(conn, rid, data.items)
-    return rid, status
+    after = audit.snapshot_recipe(conn, rid)
+    audit.record_event(
+        conn, recipe_id=rid, recipe_code=data.code, version=data.version,
+        action="created", before=before_audit, after=after,
+    )
+    return rid, "created"
 
 
 def delete_recipe(conn: sqlite3.Connection, recipe_id: int) -> bool:
-    cur = conn.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
-    return cur.rowcount > 0
+    """删除配方，并在同一事务内（删除前快照）追加审计事件。"""
+    before = audit.snapshot_recipe(conn, recipe_id)
+    if before is None:
+        return False
+    conn.execute("DELETE FROM recipe_items WHERE recipe_id = ?", (recipe_id,))
+    conn.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
+    audit.record_event(
+        conn, recipe_id=recipe_id, recipe_code=before["code"], version=before["version"],
+        action="deleted", before=before, after=None,
+    )
+    return True
 
 
 # ---------------- 替代关系 ----------------

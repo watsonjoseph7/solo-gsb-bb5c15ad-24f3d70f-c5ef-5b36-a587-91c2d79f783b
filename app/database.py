@@ -40,9 +40,35 @@ CREATE TABLE IF NOT EXISTS substitutions (
     UNIQUE(source_code, target_code)
 );
 
+CREATE TABLE IF NOT EXISTS recipe_audit_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id       INTEGER NOT NULL,          -- 配方删除后仍保留事件，故不设外键级联
+    recipe_code     TEXT NOT NULL,
+    version         TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL CHECK (action IN ('created', 'updated', 'deleted')),
+    occurred_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    before_snapshot TEXT,                      -- JSON：操作前完整配方+配料快照
+    after_snapshot  TEXT                       -- JSON：操作后完整配方+配料快照
+);
+
 CREATE INDEX IF NOT EXISTS idx_items_recipe ON recipe_items(recipe_id);
 CREATE INDEX IF NOT EXISTS idx_sub_source ON substitutions(source_code);
 CREATE INDEX IF NOT EXISTS idx_sub_target ON substitutions(target_code);
+CREATE INDEX IF NOT EXISTS idx_audit_recipe ON recipe_audit_events(recipe_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_audit_code ON recipe_audit_events(recipe_code, occurred_at);
+
+-- 审计事件只允许追加：触发器禁止 UPDATE / DELETE，保证审计链不可变
+CREATE TRIGGER IF NOT EXISTS trg_recipe_audit_no_update
+BEFORE UPDATE ON recipe_audit_events
+BEGIN
+    SELECT RAISE(ABORT, 'recipe_audit_events 为不可变审计表，禁止 UPDATE');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_recipe_audit_no_delete
+BEFORE DELETE ON recipe_audit_events
+BEGIN
+    SELECT RAISE(ABORT, 'recipe_audit_events 为不可变审计表，禁止 DELETE');
+END;
 """
 
 

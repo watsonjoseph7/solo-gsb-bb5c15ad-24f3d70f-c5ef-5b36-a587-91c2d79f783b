@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from . import crud, graph, safe_plans, seed
+from . import audit, crud, graph, safe_plans, seed
 from .database import get_connection, init_db
 from .schemas import (
     ConfirmPlanIn,
@@ -89,6 +89,10 @@ def conn_dep():
     try:
         yield c
         c.commit()
+    except Exception:
+        # 配方表修改与审计事件写入必须在同一事务中：任一步失败整体回滚
+        c.rollback()
+        raise
     finally:
         c.close()
 
@@ -256,6 +260,53 @@ def _validate_items(conn, data: RecipeIn):
     missing = [it.ingredient_code for it in data.items if it.ingredient_code not in codes]
     if missing:
         raise HTTPException(422, f"配方引用了不存在的原料: {', '.join(missing)}")
+
+
+# ---------------- 配方变更审计时间线 ----------------
+
+def _parse_range(start: Optional[str], end: Optional[str]):
+    try:
+        return audit.parse_dt_boundary(start), audit.parse_dt_boundary(end)
+    except ValueError:
+        raise HTTPException(422, "时间格式无效，请使用 ISO 8601，如 2026-09-01 或 2026-09-01T08:00:00")
+
+
+@app.get("/api/audit/events")
+def get_audit_events(
+    recipe_id: Optional[int] = None,
+    recipe_code: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    conn=Depends(conn_dep),
+):
+    """配方变更审计时间线：可按配方 id / 配方代码 / 时间范围过滤，按时间倒序。"""
+    if not 1 <= limit <= 500:
+        raise HTTPException(422, "limit 取值范围为 1~500")
+    start_dt, end_dt = _parse_range(start, end)
+    rows = audit.list_events(
+        conn, recipe_id=recipe_id, recipe_code=recipe_code,
+        start=start_dt, end=end_dt, limit=limit,
+    )
+    return [audit.event_out(r) for r in rows]
+
+
+@app.get("/api/recipes/{recipe_id}/audit")
+def get_recipe_audit(
+    recipe_id: int,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 100,
+    conn=Depends(conn_dep),
+):
+    """单个配方的变更审计时间线（含每次事件的前后配料快照与可读差异）。"""
+    if crud.get_recipe(conn, recipe_id) is None:
+        raise HTTPException(404, "配方不存在")
+    if not 1 <= limit <= 500:
+        raise HTTPException(422, "limit 取值范围为 1~500")
+    start_dt, end_dt = _parse_range(start, end)
+    rows = audit.list_events(conn, recipe_id=recipe_id, start=start_dt, end=end_dt, limit=limit)
+    return [audit.event_out(r) for r in rows]
 
 
 # ---------------- 过敏原图分析 ----------------
@@ -461,10 +512,11 @@ def import_data(payload: dict, mode: str = "merge", conn=Depends(conn_dep)):
         raise HTTPException(422, f"JSON 结构不合法: {exc.errors()}")
 
     if mode == "replace":
-        conn.executescript(
-            "DELETE FROM recipe_items; DELETE FROM recipes; "
-            "DELETE FROM substitutions; DELETE FROM ingredients;"
-        )
+        # 逐个删除配方以保留每条删除审计事件；审计表自身的触发器会拒绝清空，
+        # 因此不能使用 DROP/DELETE FROM recipe_audit_events 之类的脚本。
+        for r in crud.list_recipes(conn):
+            crud.delete_recipe(conn, r["id"])
+        conn.executescript("DELETE FROM substitutions; DELETE FROM ingredients;")
 
     for ing in bundle.ingredients:
         crud.upsert_ingredient(conn, ing)
